@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hidden_imports = [
+    'python_calamine',
+    'keyring.backends.Windows',
+    'faiss',
+] + collect_submodules('src')
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=[],
     datas=[],
-    hiddenimports=['python_calamine', 'keyring.backends.Windows', 'faiss'],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
