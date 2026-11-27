@@ -35,6 +35,7 @@ class ScreenQuizData:
 class OCRScanner:
     def __init__(self, tesseract_dir: Path, lang: str = "vie+eng"):
         self.lang = lang
+        self._last_debug_sig = ""
         exe_path = tesseract_dir / "tesseract.exe"
         tessdata_path = tesseract_dir / "tessdata"
         if exe_path.exists():
@@ -45,8 +46,8 @@ class OCRScanner:
     def capture_browser_region(self) -> Tuple[Image.Image, int, int]:
         with mss.mss() as sct:
             monitor = sct.monitors[1]
-            top_crop = int(monitor["height"] * 0.11)
-            bottom_crop = int(monitor["height"] * 0.05)
+            top_crop = int(monitor["height"] * 0.10)
+            bottom_crop = int(monitor["height"] * 0.04)
             region = {
                 "left": monitor["left"],
                 "top": monitor["top"] + top_crop,
@@ -66,7 +67,7 @@ class OCRScanner:
         for i in range(n):
             word = data["text"][i].strip()
             conf = int(data["conf"][i])
-            if not word or conf < 40:
+            if not word or conf < 35:
                 continue
             key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
             lines_map.setdefault(key, []).append({
@@ -88,11 +89,47 @@ class OCRScanner:
             merged_lines.append({
                 "text": line_text,
                 "bbox": (left, top, right - left, bottom - top),
-                "top": top
+                "top": top,
+                "left": left,
             })
-        merged_lines.sort(key=lambda x: x["top"])
+        merged_lines.sort(key=lambda x: (x["top"], x["left"]))
 
-        return self._parse_quiz_structure(merged_lines)
+        # Gộp các nhãn A/B/C/D đứng riêng 1 khối bên trái với nội dung đáp án ngang hàng
+        merged_lines = self._merge_split_option_labels(merged_lines)
+
+        result = self._parse_quiz_structure(merged_lines)
+        if not result and merged_lines:
+            sample = " | ".join(l["text"] for l in merged_lines[:6])[:180]
+            if sample != self._last_debug_sig:
+                self._last_debug_sig = sample
+                logger.info(f"OCR đã đọc {len(merged_lines)} dòng nhưng chưa khớp mẫu câu hỏi. Mẫu: {sample}")
+        return result
+
+    def _merge_split_option_labels(self, lines: List[Dict]) -> List[Dict]:
+        label_only = re.compile(r"^[\(\[\{]?([A-Fa-f])[\)\]\.\:\-]?$")
+        used = set()
+        combined = []
+        for i, line in enumerate(lines):
+            if i in used:
+                continue
+            m = label_only.match(line["text"].strip())
+            if m and i + 1 < len(lines):
+                nxt = lines[i + 1]
+                if abs(nxt["top"] - line["top"]) <= 28 and nxt["left"] > line["left"]:
+                    l = min(line["bbox"][0], nxt["bbox"][0])
+                    t = min(line["bbox"][1], nxt["bbox"][1])
+                    r = max(line["bbox"][0] + line["bbox"][2], nxt["bbox"][0] + nxt["bbox"][2])
+                    b = max(line["bbox"][1] + line["bbox"][3], nxt["bbox"][1] + nxt["bbox"][3])
+                    combined.append({
+                        "text": f"{m.group(1).upper()}. {nxt['text']}",
+                        "bbox": (l, t, r - l, b - t),
+                        "top": t,
+                        "left": l,
+                    })
+                    used.add(i + 1)
+                    continue
+            combined.append(line)
+        return combined
 
     def _parse_quiz_structure(self, lines: List[Dict]) -> Optional[ScreenQuizData]:
         option_pattern = re.compile(r"^[\(\[\{]?([A-Fa-f])[\)\]\.\:\-\s]+(.+)$")
@@ -103,23 +140,40 @@ class OCRScanner:
             if m:
                 option_indices.append((idx, m.group(1).upper(), m.group(2).strip(), line["bbox"]))
 
-        if len(option_indices) < 2:
-            return None
-
-        first_opt_idx = option_indices[0][0]
-        start_q_idx = max(0, first_opt_idx - 8)
-        question_lines = [lines[i]["text"] for i in range(start_q_idx, first_opt_idx)]
-        question_text = " ".join(question_lines).strip()
-
-        if len(question_text) < 10:
-            return None
-
         options: List[OptionBox] = []
-        seen_labels = set()
-        for _, label, opt_text, bbox in option_indices:
-            if label not in seen_labels:
-                seen_labels.add(label)
-                options.append(OptionBox(label=label, text=opt_text, bbox=bbox))
+        question_text = ""
+
+        # Trường hợp 1: Có nhãn A/B/C/D rõ ràng
+        if len(option_indices) >= 2:
+            first_opt_idx = option_indices[0][0]
+            start_q_idx = max(0, first_opt_idx - 8)
+            question_lines = [lines[i]["text"] for i in range(start_q_idx, first_opt_idx)]
+            question_text = " ".join(question_lines).strip()
+
+            seen_labels = set()
+            for _, label, opt_text, bbox in option_indices:
+                if label not in seen_labels:
+                    seen_labels.add(label)
+                    options.append(OptionBox(label=label, text=opt_text, bbox=bbox))
+
+        # Trường hợp 2 (Fallback): Giao diện web không có chữ A/B/C/D (chỉ có nút tròn/ô vuông)
+        else:
+            q_idx = -1
+            for idx, line in enumerate(lines):
+                txt = line["text"].strip()
+                if len(txt) >= 15 and (txt.endswith("?") or txt.endswith(":") or re.match(r"^(Câu|Question)\s*\d+", txt, re.I)):
+                    q_idx = idx
+                    break
+            if q_idx != -1 and len(lines) - (q_idx + 1) >= 2:
+                question_text = lines[q_idx]["text"].strip()
+                candidate_lines = lines[q_idx + 1: q_idx + 6]
+                labels = ["A", "B", "C", "D", "E"]
+                for i, cand in enumerate(candidate_lines):
+                    if len(cand["text"].strip()) >= 2:
+                        options.append(OptionBox(label=labels[i], text=cand["text"].strip(), bbox=cand["bbox"]))
+
+        if len(question_text) < 10 or len(options) < 2:
+            return None
 
         q_lower = question_text.lower()
         is_multi = any(kw in q_lower for kw in [
