@@ -22,6 +22,7 @@ jobs:
           choco install tesseract -y
 
       - name: Build Portable Package
+        working-directory: QuizHelper-Source
         shell: pwsh
         run: |
           .\build_portable.ps1
@@ -30,4 +31,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: QuizHelper-Portable
-          path: QuizHelper-Portable.zip
+          path: QuizHelper-Source/QuizHelper-Portable.zip
