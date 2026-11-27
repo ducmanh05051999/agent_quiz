@@ -1,0 +1,33 @@
+name: Build QuizHelper Windows Portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Tesseract OCR on Windows Runner
+        run: |
+          choco install tesseract -y
+
+      - name: Build Portable Package
+        shell: pwsh
+        run: |
+          .\build_portable.ps1
+
+      - name: Upload QuizHelper-Portable.zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuizHelper-Portable
+          path: QuizHelper-Portable.zip
